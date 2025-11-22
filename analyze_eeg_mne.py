@@ -1,3 +1,16 @@
+"""Анализ EEG файлов и экспорт сводных отчётов.
+
+Скрипт выполняет:
+- Поиск и чтение EEG файлов разных форматов (EDF/BDF/BrainVision/CNT/FIF/EEGLAB/Matlab .mat).
+- Извлечение ключевой информации: частота дискретизации, число каналов, длительность,
+  число эпох, распределение меток событий.
+- Сохранение сводных CSV (по файлам и по меткам) и построение графиков.
+- Экспорт подробного отчёта по эпохам в Excel как для MNE Epochs, так и для .mat файлов
+  (с сопоставлением меток к эпохам).
+
+Примечание: импорт некоторых библиотек является опциональным. Если пакет недоступен,
+соответствующая функциональность будет пропущена (переменная будет установлена в None).
+"""
 import argparse
 import csv
 import sys
@@ -7,22 +20,26 @@ from collections import Counter
 
 import numpy as np
 
+"""Опциональный импорт MNE: если пакет недоступен, анализ через MNE будет отключён."""
 try:
     import mne
     mne.set_log_level("WARNING")
 except Exception:
     mne = None
 
+"""Опциональный импорт scipy.io.loadmat: нужен для чтения .mat файлов."""
 try:
     from scipy.io import loadmat
 except Exception:
     loadmat = None
 
+"""Опциональный импорт Matplotlib: для построения графиков сводной статистики."""
 try:
     import matplotlib.pyplot as plt
 except Exception:
     plt = None
 
+"""Опциональный импорт Seaborn: стиль и упрощение построения графиков."""
 try:
     import seaborn as sns
     if sns is not None:
@@ -30,15 +47,29 @@ try:
 except Exception:
     sns = None
 
+"""Опциональный импорт openpyxl: экспорт отчётов по эпохам в Excel."""
 try:
     from openpyxl import Workbook
 except Exception:
     Workbook = None
 
-DEFAULT_DATA_DIR = "data"
-DEFAULT_OUTPUT_DIR = "."
+# Базовая папка с исходными данными по умолчанию
+DEFAULT_DATA_DIR = "data"  # Базовая папка с исходными данными по умолчанию
+# Папка вывода по умолчанию (текущий каталог)
+DEFAULT_OUTPUT_DIR = "."  # Папка вывода по умолчанию (текущий каталог)
 
 def format_seconds(total_seconds: float) -> str:
+    """Преобразует количество секунд в человеко-читаемую строку.
+
+    Назначение:
+    - Возвращает строку в формате HH:MM:SS.mmm для заданного числа секунд.
+
+    Аргументы:
+    - total_seconds: число секунд (float) или None.
+
+    Возвращает:
+    - Строка формата "hh:mm:ss.mmm". Если значение неизвестно (None), возвращает "unknown".
+    """
     if total_seconds is None:
         return "unknown"
     total_seconds = float(total_seconds)
@@ -48,6 +79,17 @@ def format_seconds(total_seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:06.3f}"
 
 def as_float(x):
+    """Безопасно преобразует входное значение к float, если возможно.
+
+    Назначение:
+    - Унифицирует числовые значения, извлекает скаляры из numpy-типов и последовательностей.
+
+    Аргументы:
+    - x: любое значение (включая numpy.generic, numpy.ndarray, list/tuple, скаляры).
+
+    Возвращает:
+    - float или None, если преобразование невозможно.
+    """
     if x is None:
         return None
     if isinstance(x, (int, float)):
@@ -71,6 +113,18 @@ def as_float(x):
         return None
 
 def get_field(obj, key):
+    """Достаёт поле/атрибут из объекта разных типов.
+
+    Назначение:
+    - Унифицированный доступ к значениям в dict, объектах с атрибутами, numpy.void (структуры из loadmat).
+
+    Аргументы:
+    - obj: объект-источник (dict, объект, np.void и т.п.).
+    - key: имя поля/атрибута.
+
+    Возвращает:
+    - Значение поля или None, если нет доступа/поля.
+    """
     if obj is None:
         return None
     if isinstance(obj, dict):
@@ -93,6 +147,14 @@ def get_field(obj, key):
     return None
 
 def to_ndarray(x):
+    """Преобразует значение к numpy.ndarray, при возможности разворачивает object-массивы.
+
+    Аргументы:
+    - x: входное значение любого типа.
+
+    Возвращает:
+    - numpy.ndarray или None, если преобразование невозможно.
+    """
     if isinstance(x, np.ndarray):
         if x.dtype == object and x.size == 1:
             try:
@@ -106,6 +168,14 @@ def to_ndarray(x):
         return None
 
 def to_str(x):
+    """Преобразует значение к строке, учитывая типы numpy и bytes.
+
+    Аргументы:
+    - x: любое значение (включая numpy.ndarray, bytes, str и т.п.).
+
+    Возвращает:
+    - Строка или None, если преобразование невозможно.
+    """
     if x is None:
         return None
     if isinstance(x, str):
@@ -130,6 +200,17 @@ def to_str(x):
         return None
 
 def analyze_raw(raw):
+    """Собирает сводную информацию по объекту MNE Raw.
+
+    Итоговая информация:
+    - Частота дискретизации, число каналов, длительность записи, возможные метки/события.
+
+    Аргументы:
+    - raw: mne.io.Raw
+
+    Возвращает:
+    - dict с ключами: type, sfreq, n_channels, duration_sec, n_epochs, labels_counts, has_labels.
+    """
     sfreq = as_float(raw.info.get("sfreq"))
     n_times = int(raw.n_times)
     duration_sec = (n_times / sfreq) if sfreq and sfreq > 0 else None
@@ -165,6 +246,14 @@ def analyze_raw(raw):
     }
 
 def analyze_epochs(epochs):
+    """Собирает сводную информацию по объекту MNE Epochs.
+
+    Аргументы:
+    - epochs: mne.Epochs
+
+    Возвращает:
+    - dict аналогичной структуры, что и для analyze_raw, но для эпох.
+    """
     sfreq = as_float(epochs.info.get("sfreq"))
     n_epochs = len(epochs)
     n_times = int(epochs.n_times)
@@ -194,12 +283,24 @@ def analyze_epochs(epochs):
     }
 
 def ensure_output_dir(path: Path):
+    """Гарантирует существование директории вывода (создаёт при отсутствии)."""
     try:
         path.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
 
 def save_csv_summaries(results, total_counts: Counter, output_dir: Path, prefix: str):
+    """Сохраняет сводные CSV по файлам и по распределению меток.
+
+    Аргументы:
+    - results: список словарей-результатов анализа по файлам.
+    - total_counts: Counter общего распределения меток.
+    - output_dir: директория сохранения.
+    - prefix: префикс имён файлов.
+
+    Возвращает:
+    - Кортеж путей (files_csv_path, labels_csv_path) в виде строк.
+    """
     files_csv_path = output_dir / f"{prefix}_files.csv"
     labels_csv_path = output_dir / f"{prefix}_labels.csv"
     fields = [
@@ -246,6 +347,17 @@ def save_csv_summaries(results, total_counts: Counter, output_dir: Path, prefix:
     return str(files_csv_path), str(labels_csv_path)
 
 def plot_summaries(results, total_counts: Counter, output_dir: Path, prefix: str):
+    """Строит и сохраняет графики распределения меток, длительностей и числа эпох.
+
+    Аргументы:
+    - results: список результатов анализа по файлам.
+    - total_counts: суммарное распределение меток (Counter).
+    - output_dir: директория сохранения.
+    - prefix: префикс имён изображений.
+
+    Возвращает:
+    - Список путей сохранённых изображений.
+    """
     saved = []
     if plt is None:
         return saved
@@ -332,6 +444,16 @@ def plot_summaries(results, total_counts: Counter, output_dir: Path, prefix: str
     return saved
 
 def export_epochs_to_excel(epochs_list, output_dir: Path, prefix: str):
+    """Экспортирует информацию об эпохах (MNE Epochs) в Excel.
+
+    Аргументы:
+    - epochs_list: список кортежей (file_name, epochs).
+    - output_dir: директория сохранения.
+    - prefix: префикс имени выходного файла.
+
+    Возвращает:
+    - Строковый путь к созданному XLSX или None при ошибке/отсутствии данных.
+    """
     if Workbook is None or not epochs_list:
         return None
     def _safe_sheet_name(name: str) -> str:
@@ -389,6 +511,14 @@ def export_epochs_to_excel(epochs_list, output_dir: Path, prefix: str):
         return None
 
 def loadmat_safely(f: str):
+    """Загружает MATLAB .mat, учитывая разные версии scipy.io.loadmat.
+
+    Аргументы:
+    - f: путь к .mat файлу.
+
+    Возвращает:
+    - dict структуры MAT или None при ошибке.
+    """
     if loadmat is None:
         return None
     try:
@@ -402,6 +532,21 @@ def loadmat_safely(f: str):
         return None
 
 def analyze_mat(path: Path):
+    """Анализирует .mat EEG-файлы и извлекает сводную информацию.
+
+    Функция поддерживает извлечение:
+    - Частоты дискретизации, числа каналов, длительности.
+    - Числа эпох и размера эпохи (samples_per_epoch).
+    - Меток по эпохам ТОЛЬКО через EEG.event(i).epoch (1-based → 0-based).
+    - Распределения меток (labels_counts).
+
+    Аргументы:
+    - path: путь до .mat файла.
+
+    Возвращает:
+    - dict с ключами: sfreq, n_channels, duration_sec, n_epochs, labels_counts,
+      has_labels, samples_per_epoch, labels_per_epoch и т.д.
+    """
     info = {
         "type": "mat",
         "sfreq": None,
@@ -468,7 +613,7 @@ def analyze_mat(path: Path):
             except Exception:
                 samples_per_epoch = None
         n_channels = int(n_channels)
-    # Сопоставление меток ТОЛЬКО через EEG.event(i).epoch (1-based -> 0-based)
+    # Сопоставление меток ТОЛЬКО через EEG.event(i).epoch (1-based → 0-based)
     if eeg is not None and n_epochs and isinstance(n_epochs, (int, np.integer)) and int(n_epochs) > 0:
         events = get_field(eeg, "event")
         if events is not None:
@@ -550,6 +695,16 @@ def analyze_mat(path: Path):
     return info
 
 def export_mat_epochs_to_excel(results, output_dir: Path, prefix: str):
+    """Экспортирует информацию об эпохах для .mat-результатов в Excel.
+
+    Аргументы:
+    - results: список dict из analyze_mat(...).
+    - output_dir: директория сохранения.
+    - prefix: префикс имени файла.
+
+    Возвращает:
+    - Путь к XLSX или None, если нечего экспортировать.
+    """
     if Workbook is None:
         return None
     def _safe_sheet_name(name: str) -> str:
@@ -635,6 +790,13 @@ def export_mat_epochs_to_excel(results, output_dir: Path, prefix: str):
         return None
 
 def read_with_mne(path: Path):
+    """Пытается прочитать файл через MNE и вернуть тип и объект.
+
+    Возвращает кортеж:
+    - ("raw", Raw) для непрерывных данных;
+    - ("epochs", Epochs) для файлов эпох;
+    - (None, None) при неуспехе/неподдерживаемом формате.
+    """
     if mne is None:
         return None, None
     f = str(path)
@@ -679,6 +841,15 @@ def read_with_mne(path: Path):
     return None, None
 
 def analyze_file(path: Path, return_obj: bool = False):
+    """Определяет тип файла и выполняет соответствующий анализ.
+
+    Аргументы:
+    - path: путь к файлу EEG.
+    - return_obj: если True, возвращает пару (результат, объект MNE/None).
+
+    Возвращает:
+    - dict результата анализа, либо (dict, объект) при return_obj=True.
+    """
     ext = path.suffix.lower()
     if ext in {".edf", ".bdf", ".vhdr", ".cnt", ".eeg", ".fif", ".set"}:
         kind, obj = read_with_mne(path)
@@ -700,6 +871,15 @@ def analyze_file(path: Path, return_obj: bool = False):
     return (skipped, None) if return_obj else skipped
 
 def gather_files(data_dir: Path, recursive: bool = False):
+    """Собирает список поддерживаемых файлов EEG в каталоге.
+
+    Аргументы:
+    - data_dir: каталог с данными.
+    - recursive: рекурсивный обход подкаталогов.
+
+    Возвращает:
+    - Список путей Path к найденным файлам.
+    """
     exts = {".edf", ".bdf", ".fif", ".vhdr", ".set", ".cnt", ".eeg", ".mat"}
     files = []
     if recursive:
@@ -713,6 +893,7 @@ def gather_files(data_dir: Path, recursive: bool = False):
     return files
 
 def main():
+    """CLI-интерфейс для пакетного анализа EEG данных и экспорта отчётов."""
     parser = argparse.ArgumentParser()
     parser.add_argument("pos_data_dir", nargs="?", default=None, help="Папка с данными (по умолчанию 'data')")
     parser.add_argument("pos_output_dir", nargs="?", default=None, help="Папка вывода (по умолчанию '.')")
