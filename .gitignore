@@ -23,6 +23,7 @@ Thumbs.db
 *.png
 *.xlsx
 *.csv
+*.mat
 
 # Local tooling
 .idea/
